@@ -1,0 +1,207 @@
+From 4f2a365e20831076816b8672735118f654ccfcd8 Mon Sep 17 00:00:00 2001
+From: Michael Drake <michael.drake@codethink.co.uk>
+Date: Thu, 7 Jun 2018 12:41:16 +0100
+Subject: [PATCH 7/9] lsusb: Add support for descriptor extensions.
+
+These allow descriptors with common fields at the start, one of
+which common fields specifies a field whos value determines which
+of a set of descriptor extensions should be used to render the
+remainder of the descriptor.
+
+Signed-off-by: Michael Drake <michael.drake@codethink.co.uk>
+---
+ desc-defs.c | 11 ++++++++++-
+ desc-defs.h | 39 ++++++++++++++++++++++++++++++++++++++-
+ desc-dump.c | 52 +++++++++++++++++++++++++++++++++++++++++++++-------
+ 3 files changed, 93 insertions(+), 9 deletions(-)
+
+diff --git a/desc-defs.c b/desc-defs.c
+index 4c374e0..60cc603 100644
+--- a/desc-defs.c
++++ b/desc-defs.c
+@@ -2,7 +2,7 @@
+ /*
+  * USB descriptor definitions
+  *
+- * Copyright (C) 2017 Michael Drake <michael.drake@codethink.co.uk>
++ * Copyright (C) 2017-2018 Michael Drake <michael.drake@codethink.co.uk>
+  */
+ 
+ #include "config.h"
+@@ -441,6 +441,15 @@ static const struct desc desc_audio_2_ac_processing_unit[] = {
+ 	{ .field = NULL }
+ };
+ 
++/**
++ * Undefined descriptor
++ *
++ * Ensures remaining data is dumped as garbage at end of descriptor.
++ */
++const struct desc desc_undefined[] = {
++	{ .field = NULL }
++};
++
+ /** UAC3: 4.5.2.10 Processing Unit Descriptor; Table 4-38. */
+ static const struct desc desc_audio_3_ac_processing_unit[] = {
+ 	{ .field = "bUnitID",             .size = 1, .type = DESC_NUMBER },
+diff --git a/desc-defs.h b/desc-defs.h
+index 99d5caa..aa695e4 100644
+--- a/desc-defs.h
++++ b/desc-defs.h
+@@ -2,7 +2,7 @@
+ /*
+  * USB descriptor definitions
+  *
+- * Copyright (C) 2017 Michael Drake <michael.drake@codethink.co.uk>
++ * Copyright (C) 2017-2018 Michael Drake <michael.drake@codethink.co.uk>
+  */
+ 
+ #ifndef _DESC_DEFS_H
+@@ -33,6 +33,7 @@ enum desc_type {
+ 	DESC_TERMINAL_STR,   /**< Audio terminal string. */
+ 	DESC_BITMAP_STRINGS, /**< Bitfield with string per bit. */
+ 	DESC_NUMBER_STRINGS, /**< Use for enum-style value to string. */
++	DESC_EXTENSION,      /**< Various possible descriptor extensions. */
+ 	DESC_SNOWFLAKE,  /**< Value with custom annotation callback function. */
+ };
+ 
+@@ -95,6 +96,39 @@ struct desc {
+ 		 * Must be a '\0' terminated string.
+ 		 */
+ 		const char *number_postfix;
++		/**
++		 * Corresponds to type DESC_EXTENSION.
++		 *
++		 * This allows the value of this field to be processed by
++		 * another descriptor definition.  The definition used to
++		 * process the value of this field can be controlled by
++		 * the value of another field.
++		 */
++		struct {
++			/**
++			 * Name of field specifying descriptor type to select.
++			 */
++			const char *type_field;
++			/**
++			 * Array of descriptor definitions and their
++			 * associated types values.  Array must be terminated
++			 * by entry with NULL `desc` member.
++			 */
++			const struct desc_ext {
++				/**
++				 * Array of descriptor field definitions.
++				 * Terminated by entry with NULL `field` member.
++				 */
++				const struct desc *desc;
++				/**
++				 * Type value for this descriptor definition.
++				 * If it matches the type read from the
++				 * field `type_field`, then this descriptor
++				 * definition will be used to decode this value.
++				 */
++				unsigned int type;
++			} *d;
++		} extension;
+ 		/**
+ 		 * Corresponds to type DESC_SNOWFLAKE.
+ 		 *
+@@ -116,6 +150,9 @@ struct desc {
+ 
+ /* ---------------------------------------------------------------------- */
+ 
++/* Undefined descriptor */
++extern const struct desc desc_undefined[];
++
+ /* Audio Control (AC) descriptor definitions */
+ extern const struct desc * const desc_audio_ac_header[3];
+ extern const struct desc * const desc_audio_ac_effect_unit[3];
+diff --git a/desc-dump.c b/desc-dump.c
+index 2f92768..19d2cc7 100644
+--- a/desc-dump.c
++++ b/desc-dump.c
+@@ -211,8 +211,10 @@ static void number_renderer(
+  *
+  * \param[in] dev           LibUSB device handle.
+  * \param[in] current       Descriptor definition field to render.
+- * \param[in] current_size  Descriptor definition field to render.
++ * \param[in] current_size  Size of value to render.
+  * \param[in] buf           Byte array containing the descriptor date to dump.
++ * \param[in] buf_len       Byte length of `buf`.
++ * \param[in] desc          First field in the descriptor definition.
+  * \param[in] indent        Current indent level.
+  * \param[in] offset        Offset to current value in `buf`.
+  */
+@@ -221,6 +223,8 @@ static void value_renderer(
+ 		const struct desc *current,
+ 		unsigned int current_size,
+ 		const unsigned char *buf,
++		unsigned int buf_len,
++		const struct desc *desc,
+ 		unsigned int indent,
+ 		size_t offset)
+ {
+@@ -312,6 +316,31 @@ static void value_renderer(
+ 		printf(" %s\n", names_audioterminal(
+ 				get_n_bytes_as_ull(buf, offset, current_size)));
+ 		break;
++	case DESC_EXTENSION: {
++		unsigned int type = get_value_from_field(buf, desc,
++				current->extension.type_field);
++		const struct desc *ext_desc;
++		const struct desc_ext *ext;
++
++		/* Lookup the extention descriptor definitions to use, */
++		for (ext = current->extension.d; ext->desc != NULL; ext++) {
++			if (ext->type == type) {
++				ext_desc = ext->desc;
++				break;
++			}
++		}
++
++		/* If the type didn't match a known type, use the
++		 * undefined descriptor. */
++		if (ext->desc == NULL) {
++			ext_desc = desc_undefined;
++		}
++
++		desc_dump(dev, ext_desc, buf + offset,
++				buf_len - offset, indent);
++
++		break;
++	}
+ 	case DESC_SNOWFLAKE:
+ 		number_renderer(buf, size_chars, offset, current_size);
+ 		current->snowflake(
+@@ -537,14 +566,23 @@ void desc_dump(
+ 			}
+ 
+ 			/* Dump the field name */
+-			field_render(entry, entries, field_len,
+-					current, indent);
++			if (current->type != DESC_EXTENSION) {
++				field_render(entry, entries, field_len,
++						current, indent);
++			}
+ 
+ 			/* Dump the value */
+-			value_renderer(dev, current, current_size, buf,
+-					indent, offset);
+-			/* Advance offset in buffer */
+-			offset += current_size;
++			value_renderer(dev, current, current_size, buf, buf_len,
++					desc, indent, offset);
++
++			if (current->type == DESC_EXTENSION) {
++				/* A desc extension consumes all remaining
++				 * value buffer. */
++				offset = buf_len;
++			} else {
++				/* Advance offset in buffer */
++				offset += current_size;
++			}
+ 		}
+ 	}
+ 
+-- 
+2.14.4
+

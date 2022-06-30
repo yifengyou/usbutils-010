@@ -1,0 +1,27 @@
+From e63347dfecc90c6658229d8636b8d1e50a126b31 Mon Sep 17 00:00:00 2001
+From: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Date: Thu, 7 Jun 2018 19:04:44 +0200
+Subject: [PATCH 9/9] desc-dump.c: fix compiler warning about unused variable
+
+Left over from the descriptor changes that just got merged.
+
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ desc-dump.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/desc-dump.c b/desc-dump.c
+index 19d2cc7..a8759f4 100644
+--- a/desc-dump.c
++++ b/desc-dump.c
+@@ -356,7 +356,6 @@ static unsigned int get_entry_size(
+ 		const struct desc *desc,
+ 		const struct desc *entry)
+ {
+-	const struct desc *current;
+ 	unsigned int size = entry->size;
+ 
+ 	if (entry->size_field != NULL) {
+-- 
+2.14.4
+
